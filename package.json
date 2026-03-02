@@ -1,0 +1,19 @@
+{
+  "name": "ci-cd-demo",
+  "version": "1.0.0",
+  "description": "A simple Node.js project to learn CI/CD with GitHub Actions",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "jest",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src/**/*.js"
+  },
+  "keywords": ["ci-cd", "github-actions", "demo"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "eslint": "^8.57.0"
+  }
+}
