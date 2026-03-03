@@ -1,0 +1,217 @@
+name: Kimi Headless Demo
+
+# 演示如何在 CI 中使用 Kimi API
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  kimi-headless-demo:
+    name: Kimi Headless Mode Demo
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # 示例 1: 使用 curl 调用 Kimi API
+    - name: Use Kimi API with curl
+      env:
+        KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      run: |
+        echo "📝 示例 1: 使用 curl 直接调用 Kimi API"
+
+        curl https://api.moonshot.cn/v1/chat/completions \
+          -H "Content-Type: application/json" \
+          -H "Authorization: Bearer $KIMI_API_KEY" \
+          -d '{
+            "model": "moonshot-v1-8k",
+            "messages": [
+              {
+                "role": "system",
+                "content": "你是一个代码分析助手"
+              },
+              {
+                "role": "user",
+                "content": "分析这个项目的结构，给出简短评价"
+              }
+            ],
+            "temperature": 0.3
+          }' > kimi_response.json
+
+        echo "Kimi 响应已保存到 kimi_response.json"
+        cat kimi_response.json | python -m json.tool || true
+
+    # 示例 2: 使用 Python SDK
+    - name: Use Kimi with Python (OpenAI Compatible)
+      env:
+        KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      run: |
+        echo "🐍 示例 2: 使用 Python SDK"
+
+        pip install openai
+
+        cat > kimi_script.py << 'EOF'
+        import os
+        from openai import OpenAI
+
+        # 配置 Kimi API (兼容 OpenAI 接口)
+        client = OpenAI(
+            api_key=os.environ.get("KIMI_API_KEY"),
+            base_url="https://api.moonshot.cn/v1"
+        )
+
+        message = client.chat.completions.create(
+            model="moonshot-v1-8k",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "你是一个代码质量分析专家"
+                },
+                {
+                    "role": "user",
+                    "content": "这是一个 CI/CD 示例项目。请简要分析代码质量。"
+                }
+            ],
+            temperature=0.3
+        )
+
+        print("=== Kimi 的回复 ===")
+        print(message.choices[0].message.content)
+        EOF
+
+        python kimi_script.py
+
+    # 示例 3: 自动化代码分析
+    - name: Automated code analysis with Kimi
+      env:
+        KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      run: |
+        echo "🔍 示例 3: 自动化代码分析"
+
+        pip install openai
+
+        cat > analyze.py << 'EOF'
+        import os
+        from openai import OpenAI
+        import json
+
+        client = OpenAI(
+            api_key=os.environ.get("KIMI_API_KEY"),
+            base_url="https://api.moonshot.cn/v1"
+        )
+
+        # 读取项目文件
+        files_to_analyze = ["package.json", "README.md"]
+
+        for file in files_to_analyze:
+            try:
+                with open(file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+
+                print(f"\n分析文件: {file}")
+                print("=" * 50)
+
+                # 限制内容长度
+                if len(content) > 2000:
+                    content = content[:2000] + "..."
+
+                response = client.chat.completions.create(
+                    model="moonshot-v1-8k",
+                    messages=[{
+                        "role": "user",
+                        "content": f"请简要分析这个文件的内容和质量：\n\n```\n{content}\n```"
+                    }],
+                    temperature=0.3,
+                    max_tokens=500
+                )
+
+                print(response.choices[0].message.content)
+
+            except FileNotFoundError:
+                print(f"文件 {file} 未找到")
+            except Exception as e:
+                print(f"分析 {file} 时出错: {e}")
+        EOF
+
+        python analyze.py
+
+    # 示例 4: 对比不同模型
+    - name: Compare Kimi models
+      env:
+        KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      run: |
+        echo "🔬 示例 4: 对比不同 Kimi 模型"
+
+        pip install openai
+
+        cat > compare_models.py << 'EOF'
+        import os
+        from openai import OpenAI
+        import time
+
+        client = OpenAI(
+            api_key=os.environ.get("KIMI_API_KEY"),
+            base_url="https://api.moonshot.cn/v1"
+        )
+
+        # 可用的 Kimi 模型
+        models = [
+            "moonshot-v1-8k",    # 8k 上下文
+            "moonshot-v1-32k",   # 32k 上下文
+            "moonshot-v1-128k"   # 128k 上下文
+        ]
+
+        question = "什么是 CI/CD？用一句话解释。"
+
+        for model in models:
+            try:
+                print(f"\n测试模型: {model}")
+                print("-" * 40)
+
+                start_time = time.time()
+
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "user", "content": question}
+                    ],
+                    temperature=0.3,
+                    max_tokens=100
+                )
+
+                elapsed_time = time.time() - start_time
+
+                print(f"响应: {response.choices[0].message.content}")
+                print(f"耗时: {elapsed_time:.2f}秒")
+                print(f"Token 使用: {response.usage.total_tokens}")
+
+            except Exception as e:
+                print(f"模型 {model} 测试失败: {e}")
+
+            time.sleep(1)  # 避免请求过快
+        EOF
+
+        python compare_models.py
+
+    - name: Summary
+      run: |
+        echo "✅ Kimi API 演示完成！"
+        echo ""
+        echo "本次演示展示了："
+        echo "  1. 使用 curl 直接调用 Kimi API"
+        echo "  2. 使用 Python SDK 与 Kimi 交互（OpenAI 兼容）"
+        echo "  3. 自动化代码分析任务"
+        echo "  4. 对比不同 Kimi 模型的性能"
+        echo ""
+        echo "Kimi API 特点："
+        echo "  - 兼容 OpenAI API 格式"
+        echo "  - 支持 8k/32k/128k 上下文"
+        echo "  - 中文支持优秀"
+        echo "  - 国内访问速度快"

@@ -1,0 +1,170 @@
+name: AI Code Review
+
+# 当创建或更新 Pull Request 时触发
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [ main, develop ]
+
+jobs:
+  kimi-code-review:
+    name: Kimi AI Code Review
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      pull-requests: write  # 需要权限来发表评论
+
+    steps:
+    # 1. 检出代码
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取完整历史以便比较
+
+    # 2. 设置 Python 环境
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    # 3. 安装依赖
+    - name: Install dependencies
+      run: |
+        pip install openai
+
+    # 4. 获取 PR 的变更文件
+    - name: Get changed files
+      id: changed-files
+      run: |
+        git diff --name-only origin/${{ github.base_ref }}...HEAD > changed_files.txt
+        echo "Changed files:"
+        cat changed_files.txt
+        echo "files=$(cat changed_files.txt | tr '\n' ' ')" >> $GITHUB_OUTPUT
+
+    # 5. 创建审查脚本
+    - name: Create review script
+      run: |
+        cat > review.py << 'EOF'
+        import os
+        import sys
+        from openai import OpenAI
+
+        # 配置 Kimi API
+        client = OpenAI(
+            api_key=os.environ.get("KIMI_API_KEY"),
+            base_url="https://api.moonshot.cn/v1"
+        )
+
+        # 读取变更文件
+        with open('changed_files.txt', 'r') as f:
+            changed_files = f.read().strip().split('\n')
+
+        # 收集文件变更内容
+        files_content = ""
+        for file in changed_files:
+            if file and os.path.exists(file):
+                print(f"读取文件: {file}")
+                try:
+                    with open(file, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                        # 限制每个文件的大小
+                        if len(content) > 5000:
+                            content = content[:5000] + "\n... (文件过长，已截断)"
+                        files_content += f"\n\n### 文件: {file}\n```\n{content}\n```\n"
+                except Exception as e:
+                    print(f"无法读取文件 {file}: {e}")
+
+        prompt = f"""请对以下 Pull Request 的代码变更进行专业的代码审查。
+
+        审查重点：
+        1. 代码质量和可读性
+        2. 潜在的 bug 和安全问题
+        3. 性能优化建议
+        4. 最佳实践和设计模式
+        5. 测试覆盖
+
+        请提供：
+        - 总体评价（Good/Needs Improvement/Critical Issues）
+        - 具体问题列表（如果有）
+        - 改进建议
+
+        代码变更：
+        {files_content}
+        """
+
+        try:
+            print("正在调用 Kimi API...")
+            response = client.chat.completions.create(
+                model="moonshot-v1-32k",
+                messages=[
+                    {"role": "system", "content": "你是一位经验丰富的代码审查专家，擅长发现代码中的问题并提供建设性的改进建议。"},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=4000
+            )
+
+            review_result = response.choices[0].message.content
+
+            with open('review_result.txt', 'w', encoding='utf-8') as f:
+                f.write(review_result)
+
+            print("审查完成")
+            print(review_result)
+
+        except Exception as e:
+            error_msg = f"审查失败: {str(e)}"
+            print(error_msg, file=sys.stderr)
+            with open('review_result.txt', 'w', encoding='utf-8') as f:
+                f.write(error_msg)
+            sys.exit(1)
+        EOF
+
+    # 6. 使用 Kimi AI 进行代码审查
+    - name: AI Code Review with Kimi
+      env:
+        KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      run: |
+        echo "🤖 开始 Kimi AI 代码审查..."
+        python review.py
+
+    # 7. 将审查结果发布为 PR 评论
+    - name: Post review comment
+      if: always()
+      uses: actions/github-script@v7
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+
+          let reviewContent = '## 🤖 Kimi AI 代码审查报告\n\n';
+
+          try {
+            const reviewResult = fs.readFileSync('review_result.txt', 'utf8');
+            reviewContent += reviewResult;
+          } catch (error) {
+            reviewContent += '⚠️ 审查过程出现问题，请查看 Actions 日志。\n';
+            reviewContent += `错误信息: ${error.message}`;
+          }
+
+          reviewContent += '\n\n---\n';
+          reviewContent += '*此审查由 Kimi AI 自动生成*';
+
+          // 发表评论
+          await github.rest.issues.createComment({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+            body: reviewContent
+          });
+
+    # 8. 上传审查报告作为 artifact
+    - name: Upload review report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: kimi-review-report
+        path: |
+          review_result.txt
+          changed_files.txt

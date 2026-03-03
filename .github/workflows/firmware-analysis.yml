@@ -1,0 +1,398 @@
+name: Firmware Security Analysis
+
+# 固件分析自动化工作流
+# 用于自动化固件逆向分析和安全评估
+
+on:
+  # 当新固件上传时触发
+  push:
+    paths:
+      - 'firmware/**/*.bin'
+      - 'firmware/**/*.hex'
+      - 'firmware/**/*.elf'
+
+  # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      firmware_path:
+        description: '固件文件路径'
+        required: true
+        default: 'firmware/sample.bin'
+      analysis_depth:
+        description: '分析深度'
+        required: true
+        type: choice
+        options:
+          - 'quick'     # 快速扫描
+          - 'standard'  # 标准分析
+          - 'deep'      # 深度分析
+
+  # 定时检查（例如每天检查供应商固件更新）
+  schedule:
+    - cron: '0 2 * * *'  # 每天凌晨2点
+
+env:
+  ANALYSIS_TIMEOUT: 3600  # 1小时超时
+
+jobs:
+  # ============================================
+  # Job 1: 预处理和验证
+  # ============================================
+  preprocess:
+    name: 固件预处理
+    runs-on: ubuntu-latest
+
+    outputs:
+      firmware_hash: ${{ steps.compute_hash.outputs.hash }}
+      should_analyze: ${{ steps.check_cache.outputs.should_analyze }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: 列出固件文件
+      id: list_files
+      run: |
+        echo "=== 固件文件列表 ==="
+        find firmware -type f \( -name "*.bin" -o -name "*.hex" -o -name "*.elf" \) || echo "没有找到固件文件"
+
+    - name: 计算固件哈希
+      id: compute_hash
+      run: |
+        if [ -f "${{ github.event.inputs.firmware_path }}" ]; then
+          HASH=$(sha256sum "${{ github.event.inputs.firmware_path }}" | awk '{print $1}')
+        else
+          HASH="none"
+        fi
+        echo "hash=$HASH" >> $GITHUB_OUTPUT
+        echo "固件 SHA256: $HASH"
+
+    - name: 检查是否已分析过
+      id: check_cache
+      run: |
+        # 检查此固件是否已经分析过
+        # 这里简化处理，实际应该查询数据库或缓存
+        if [ -f "analysis_cache/${{ steps.compute_hash.outputs.hash }}.json" ]; then
+          echo "should_analyze=false" >> $GITHUB_OUTPUT
+          echo "✅ 此固件已分析过，跳过"
+        else
+          echo "should_analyze=true" >> $GITHUB_OUTPUT
+          echo "🔍 新固件，需要分析"
+        fi
+
+    - name: 提取固件元数据
+      run: |
+        echo "提取固件基本信息..."
+        file "${{ github.event.inputs.firmware_path }}" || true
+        ls -lh "${{ github.event.inputs.firmware_path }}" || true
+
+  # ============================================
+  # Job 2: 基础安全检查（云端）
+  # ============================================
+  basic_security_scan:
+    name: 基础安全扫描
+    runs-on: ubuntu-latest
+    needs: preprocess
+    if: needs.preprocess.outputs.should_analyze == 'true'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: 安装分析工具
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y binwalk strings file
+
+    - name: Binwalk 分析
+      run: |
+        echo "=== Binwalk 文件系统分析 ==="
+        binwalk "${{ github.event.inputs.firmware_path }}" | tee binwalk_output.txt || true
+
+    - name: 字符串提取
+      run: |
+        echo "=== 提取可疑字符串 ==="
+        strings "${{ github.event.inputs.firmware_path }}" | \
+          grep -E "(password|admin|root|key|secret|token)" | \
+          head -n 50 | tee suspicious_strings.txt || true
+
+    - name: 上传基础扫描结果
+      uses: actions/upload-artifact@v4
+      with:
+        name: basic-scan-results
+        path: |
+          binwalk_output.txt
+          suspicious_strings.txt
+
+  # ============================================
+  # Job 3: IDA Pro + Kimi 深度分析（自托管）
+  # ============================================
+  ida_pro_analysis:
+    name: IDA Pro 深度分析
+    # 注意：这需要自托管 Runner，因为需要 IDA Pro 许可证
+    runs-on: [self-hosted, ida-pro]
+    needs: preprocess
+    if: needs.preprocess.outputs.should_analyze == 'true'
+
+    # 安全设置
+    timeout-minutes: 60
+    environment: secure-analysis  # 需要审批
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: 安全检查
+      run: |
+        echo "⚠️ 安全提醒："
+        echo "- 固件将在隔离环境中分析"
+        echo "- 不会自动上传原始固件到云端"
+        echo "- 分析结果将被脱敏处理"
+
+    - name: 准备 IDA Pro 环境
+      run: |
+        # 检查 IDA Pro 是否可用
+        if ! command -v idat64 &> /dev/null; then
+          echo "❌ IDA Pro 未安装"
+          exit 1
+        fi
+
+        echo "✅ IDA Pro 已就绪"
+        idat64 -v || true
+
+    - name: 设置 Python 环境
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: 安装依赖
+      run: |
+        pip install openai pyyaml
+
+    - name: 启动 IDA Pro MCP Server
+      run: |
+        echo "启动 IDA Pro MCP Server..."
+        # 这里需要你的 MCP Server 启动脚本
+        # python ida_mcp_server.py &
+        # echo $! > mcp_server.pid
+
+    - name: 运行 Kimi 分析
+      env:
+        KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+      run: |
+        echo "🤖 开始 Kimi + IDA Pro 自动化分析"
+
+        # 创建分析脚本
+        cat > analyze.py << 'EOF'
+        import os
+        import json
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=os.environ.get("KIMI_API_KEY"),
+            base_url="https://api.moonshot.cn/v1"
+        )
+
+        # 分析任务列表
+        tasks = [
+            {
+                "name": "架构识别",
+                "prompt": "通过 IDA Pro MCP，识别固件的目标架构、入口点和加载地址。"
+            },
+            {
+                "name": "危险函数检测",
+                "prompt": "搜索strcpy、sprintf、system等危险函数的使用，评估安全风险。"
+            },
+            {
+                "name": "加密算法识别",
+                "prompt": "查找加密相关的常量和算法实现，检查是否使用弱加密。"
+            },
+            {
+                "name": "网络通信分析",
+                "prompt": "识别网络相关函数，分析通信协议和端口使用。"
+            }
+        ]
+
+        results = []
+        for task in tasks:
+            print(f"\n=== {task['name']} ===")
+
+            # 注意：这里简化了 MCP 调用
+            # 实际需要使用 MCP 协议连接到 IDA Pro
+            response = client.chat.completions.create(
+                model="moonshot-v1-32k",
+                messages=[{
+                    "role": "user",
+                    "content": f"""
+        你正在通过 IDA Pro MCP 分析固件。
+
+        任务: {task['prompt']}
+
+        请提供简明的分析结果，包括：
+        1. 发现的问题
+        2. 风险等级（Critical/High/Medium/Low）
+        3. 建议措施
+        """
+                }],
+                temperature=0.3,
+                max_tokens=2000
+            )
+
+            result = {
+                "task": task['name'],
+                "findings": response.choices[0].message.content
+            }
+            results.append(result)
+            print(result['findings'])
+
+        # 保存结果
+        with open('analysis_results.json', 'w') as f:
+            json.dump(results, f, indent=2, ensure_ascii=False)
+
+        print("\n✅ 分析完成")
+        EOF
+
+        python analyze.py
+
+    - name: 生成分析报告
+      run: |
+        cat > generate_report.py << 'EOF'
+        import json
+        from datetime import datetime
+
+        with open('analysis_results.json') as f:
+            results = json.load(f)
+
+        with open('ANALYSIS_REPORT.md', 'w') as f:
+            f.write("# 固件安全分析报告\n\n")
+            f.write(f"**分析时间:** {datetime.now().isoformat()}\n")
+            f.write(f"**固件哈希:** ${{ needs.preprocess.outputs.firmware_hash }}\n\n")
+
+            f.write("## 🔍 分析摘要\n\n")
+
+            # 统计风险级别
+            critical = sum(1 for r in results if 'Critical' in r['findings'])
+            high = sum(1 for r in results if 'High' in r['findings'])
+
+            f.write(f"- 🔴 严重风险: {critical}\n")
+            f.write(f"- 🟠 高风险: {high}\n\n")
+
+            f.write("## 📋 详细发现\n\n")
+
+            for result in results:
+                f.write(f"### {result['task']}\n\n")
+                f.write(f"{result['findings']}\n\n")
+                f.write("---\n\n")
+
+            f.write("## 🛡️ 建议措施\n\n")
+            f.write("1. 优先修复严重和高风险问题\n")
+            f.write("2. 进行人工代码审计\n")
+            f.write("3. 实施安全测试\n")
+
+        print("✅ 报告已生成")
+        EOF
+
+        python generate_report.py
+
+    - name: 清理敏感数据
+      if: always()
+      run: |
+        # 确保不会上传原始固件或敏感数据
+        rm -f "${{ github.event.inputs.firmware_path }}" || true
+        echo "✅ 已清理敏感数据"
+
+    - name: 停止 MCP Server
+      if: always()
+      run: |
+        if [ -f mcp_server.pid ]; then
+          kill $(cat mcp_server.pid) || true
+        fi
+
+    - name: 上传分析报告
+      uses: actions/upload-artifact@v4
+      with:
+        name: ida-analysis-report
+        path: |
+          ANALYSIS_REPORT.md
+          analysis_results.json
+
+  # ============================================
+  # Job 4: 安全告警和通知
+  # ============================================
+  security_alerts:
+    name: 安全告警
+    runs-on: ubuntu-latest
+    needs: [basic_security_scan, ida_pro_analysis]
+    if: always()
+
+    steps:
+    - name: 下载分析结果
+      uses: actions/download-artifact@v4
+      with:
+        name: ida-analysis-report
+
+    - name: 检查严重问题
+      id: check_critical
+      run: |
+        if grep -q "Critical" ANALYSIS_REPORT.md; then
+          echo "has_critical=true" >> $GITHUB_OUTPUT
+          echo "🚨 发现严重安全问题！"
+        else
+          echo "has_critical=false" >> $GITHUB_OUTPUT
+          echo "✅ 未发现严重问题"
+        fi
+
+    - name: 发送 Slack 通知（如配置）
+      if: steps.check_critical.outputs.has_critical == 'true'
+      run: |
+        # 发送告警到 Slack/Teams/邮件等
+        echo "🚨 严重安全问题告警已发送"
+        # curl -X POST ${{ secrets.SLACK_WEBHOOK }} -d '{"text":"发现严重固件安全问题"}'
+
+    - name: 创建 GitHub Issue
+      if: steps.check_critical.outputs.has_critical == 'true'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          const report = fs.readFileSync('ANALYSIS_REPORT.md', 'utf8');
+
+          await github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: '🚨 固件安全分析发现严重问题',
+            body: report,
+            labels: ['security', 'critical', 'firmware']
+          });
+
+  # ============================================
+  # Job 5: 归档和知识库更新
+  # ============================================
+  archive_results:
+    name: 归档分析结果
+    runs-on: ubuntu-latest
+    needs: [ida_pro_analysis]
+    if: success()
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: 下载所有分析结果
+      uses: actions/download-artifact@v4
+
+    - name: 归档到知识库
+      run: |
+        # 将分析结果保存到知识库
+        mkdir -p firmware_knowledge_base/${{ needs.preprocess.outputs.firmware_hash }}
+        cp -r *-results firmware_knowledge_base/${{ needs.preprocess.outputs.firmware_hash }}/
+
+        echo "✅ 分析结果已归档"
+
+    - name: 提交到仓库（可选）
+      run: |
+        git config user.name "Firmware Analysis Bot"
+        git config user.email "bot@example.com"
+        git add firmware_knowledge_base/
+        git commit -m "📊 Add firmware analysis: ${{ needs.preprocess.outputs.firmware_hash }}" || true
+        # git push  # 如果需要自动提交
